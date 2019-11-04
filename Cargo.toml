@@ -1,0 +1,22 @@
+[package]
+name = "doorways"
+version = "0.1.0"
+authors = ["Joshua Benuck <joshua_benuck@yahoo.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "*"
+dirs = "*"
+failure = "*"
+glob = "*"
+ggez = "*"
+image = "*"
+reqwest = "*"
+serde = "*"
+serde_json = "*"
+url = "*"
+image_grid = { path = "../image_grid" }
+twitch = { path = "../twitch" }
+steam = { path = "../steam" }

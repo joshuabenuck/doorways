@@ -265,7 +265,7 @@ impl Doorways {
     fn load_imgs(&mut self, ctx: &mut Context) -> Result<&Doorways, Error> {
         for game in &mut self.games {
             game.image_path = match &game.image_src {
-                ImageSource::Url(url) => Some(game.download_img(&self.image_folder).unwrap()),
+                ImageSource::Url(_) => Some(game.download_img(&self.image_folder).unwrap()),
                 ImageSource::Path(path) => Some(PathBuf::from(path)),
             };
             let bytes = game.read_img(&game.image_path.as_ref().unwrap())?;
@@ -427,7 +427,12 @@ fn main() -> Result<(), Error> {
         let games = SteamGame::from(&app_infos)?;
         Doorways::from_steam_games(image_folder.to_path_buf(), games)
     } else {
-        Doorways::load(doorways_cache.clone())?
+        let twitch_cache = home.join(".twitch");
+
+        Doorways::load(doorways_cache.clone())?.merge_with(Doorways::from_twitch_db(
+            image_folder.to_path_buf(),
+            &TwitchDb::load(&twitch_cache)?,
+        ))
     };
 
     if matches.is_present("launcher") {
@@ -435,6 +440,7 @@ fn main() -> Result<(), Error> {
         let (mut ctx, mut event_loop) = cb.build()?;
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs(&mut ctx)?;
+        doorways.update_filter(DisplayFilter::Kids);
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
         graphics::set_resizable(&mut ctx, true)?;
         event::run(&mut ctx, &mut event_loop, &mut grid)?;

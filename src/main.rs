@@ -1,6 +1,6 @@
 use clap::{App, Arg};
 use dirs;
-use failure::Error;
+use failure::{err_msg, Error};
 use ggez::event;
 use ggez::{
     self,
@@ -18,6 +18,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use steam::{app_info::AppInfo, steam_game::SteamGame};
 use twitch::twitch_db::{Install, Product, TwitchDb};
 use url::Url;
 
@@ -31,8 +32,6 @@ enum ImageSource {
 struct Game {
     id: String,
     title: String,
-    #[serde(skip)]
-    image: Option<graphics::Image>,
     image_path: Option<PathBuf>,
     image_src: ImageSource,
     installed: bool,
@@ -74,14 +73,22 @@ impl Game {
     }
 
     fn launch(&self) -> Result<Child, Error> {
-        let install_directory = PathBuf::from(
-            self.install_directory
-                .as_ref()
-                .expect("Unable to launch game"),
-        );
-        let mut launch = Command::new(install_directory.join(self.command.as_ref().unwrap()));
-        launch.args(self.args.as_ref().unwrap());
-        Ok(launch.spawn()?)
+        if self.install_directory.is_some() && self.command.is_some() {
+            let install_directory = PathBuf::from(
+                self.install_directory
+                    .as_ref()
+                    .expect("Unable to launch game"),
+            );
+            let mut launch = Command::new(install_directory.join(self.command.as_ref().unwrap()));
+            launch.args(self.args.as_ref().unwrap());
+            return Ok(launch.spawn()?);
+        }
+        if self.launch_url.is_some() {
+            let mut launch = Command::new("cmd");
+            launch.args(&["/C", "start", self.launch_url.as_ref().unwrap()]);
+            return Ok(launch.spawn()?);
+        }
+        Err(err_msg("Unable to launch: Missing launch_url or command"))
     }
 }
 
@@ -119,7 +126,7 @@ impl Doorways {
             background_color: None,
         };
         doorways.sort();
-        doorways.update_filter(DisplayFilter::Kids);
+        doorways.update_filter(DisplayFilter::All);
         Ok(doorways)
     }
 
@@ -140,6 +147,9 @@ impl Doorways {
                     custom.image_src = orig.image_src.clone();
                     custom.install_directory = orig.install_directory.clone();
                     custom.installed = orig.installed.clone();
+                    custom.command = orig.command.clone();
+                    custom.args = orig.args.clone();
+                    custom.launch_url = orig.launch_url.clone();
                 }
             }
             if !found {
@@ -150,11 +160,44 @@ impl Doorways {
         self
     }
 
-    fn from_twitch_db(image_folder: PathBuf, twitch_db: &TwitchDb) -> Doorways {
-        Doorways::from(image_folder, &twitch_db.products, &twitch_db.installs)
+    fn from_steam_games(image_folder: PathBuf, games: Vec<SteamGame>) -> Doorways {
+        // Not able to do anything useful with uninstalled Steam game records yet.
+        // Still need to figure out which ones are noise and which are not.
+        let games = games
+            .iter()
+            .filter(|g| g.installed)
+            .map(|g| Game {
+                id: g.id.to_string(),
+                title: g.title.clone(),
+                image_src: ImageSource::Path(g.logo.as_ref().unwrap().clone()),
+                installed: g.installed,
+                launch_url: Some(format!("steam://rungameid/{}", g.id)),
+                kids: None,
+                players: None,
+                command: None,
+                args: None,
+                image_path: None,
+                install_directory: None,
+            })
+            .collect();
+        let mut doorways = Doorways {
+            games,
+            display_filter: DisplayFilter::All,
+            displayed_games: Vec::new(),
+            display_installed: Some(true),
+            images: Vec::new(),
+            image_folder,
+            edit_mode: false,
+            background_color: None,
+        };
+        doorways.sort();
+        doorways.update_filter(DisplayFilter::All);
+        doorways
     }
 
-    fn from(image_folder: PathBuf, products: &Vec<Product>, installs: &Vec<Install>) -> Doorways {
+    fn from_twitch_db(image_folder: PathBuf, twitch_db: &TwitchDb) -> Doorways {
+        let products = &twitch_db.products;
+        let installs = &twitch_db.installs;
         let games: Vec<Game> = products
             .iter()
             .map(|p| {
@@ -172,16 +215,15 @@ impl Doorways {
                 Game {
                     id: p.product_asin.clone(),
                     title: p.product_title.clone(),
-                    image: None,
                     image_src: ImageSource::Url(p.product_icon_url.clone()),
-                    image_path: None,
                     installed,
                     install_directory,
                     kids: None,
                     players: None,
-                    launch_url: None,
                     command: None,
                     args: None,
+                    image_path: None,
+                    launch_url: None,
                 }
             })
             .collect();
@@ -361,6 +403,12 @@ fn main() -> Result<(), Error> {
                 .help("List the known games."),
         )
         .arg(
+            Arg::with_name("refresh")
+                .long("refresh")
+                .takes_value(true)
+                .help("Refresh the list of games from source."),
+        )
+        .arg(
             Arg::with_name("launch")
                 .long("launch")
                 .short("l")
@@ -373,7 +421,14 @@ fn main() -> Result<(), Error> {
     let doorways_cache = home.join(".doorways");
     let image_folder = &doorways_cache.join("images");
     let config = dirs::config_dir().unwrap();
-    let mut doorways = Doorways::load(doorways_cache.clone())?;
+    let mut doorways = if !doorways_cache.join("games.json").exists() {
+        eprintln!("Creating initial games list.");
+        let app_infos = AppInfo::load()?;
+        let games = SteamGame::from(&app_infos)?;
+        Doorways::from_steam_games(image_folder.to_path_buf(), games)
+    } else {
+        Doorways::load(doorways_cache.clone())?
+    };
 
     if matches.is_present("launcher") {
         let cb = ggez::ContextBuilder::new("Image Grid", "Joshua Benuck");

@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use steam::{app_info::AppInfo, steam_game::SteamGame};
-use twitch::twitch_db::{Install, Product, TwitchDb};
+use twitch::{TwitchDb, TwitchGame};
 use url::Url;
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -39,6 +39,7 @@ struct Game {
     players: Option<usize>,
     launch_url: Option<String>,
     install_directory: Option<String>,
+    working_subdir_override: Option<String>,
     command: Option<String>,
     args: Option<Vec<String>>,
 }
@@ -73,13 +74,30 @@ impl Game {
     }
 
     fn launch(&self) -> Result<Child, Error> {
+        println!(
+            "Launching {:?} {:?} {:?} {:?} {:?}",
+            self.install_directory,
+            self.working_subdir_override,
+            self.command,
+            self.args,
+            self.launch_url
+        );
         if self.install_directory.is_some() && self.command.is_some() {
             let install_directory = PathBuf::from(
                 self.install_directory
                     .as_ref()
                     .expect("Unable to launch game"),
             );
-            let mut launch = Command::new(install_directory.join(self.command.as_ref().unwrap()));
+            let full_command =
+                PathBuf::from(install_directory.join(self.command.as_ref().unwrap()));
+            let mut launch = Command::new(&full_command);
+            if self.working_subdir_override.is_some() {
+                launch.current_dir(
+                    install_directory.join(self.working_subdir_override.as_ref().unwrap()),
+                );
+            } else {
+                launch.current_dir(install_directory);
+            }
             launch.args(self.args.as_ref().unwrap());
             return Ok(launch.spawn()?);
         }
@@ -108,23 +126,30 @@ struct Doorways {
     images: Vec<graphics::Image>,
     image_folder: PathBuf,
     edit_mode: bool,
+    allow_filter: bool,
     background_color: Option<graphics::Color>,
 }
 
 impl Doorways {
-    fn load(cache_dir: PathBuf) -> Result<Doorways, Error> {
-        let games: Vec<Game> =
-            serde_json::from_str(fs::read_to_string(cache_dir.join("games.json"))?.as_str())?;
-        let mut doorways = Doorways {
-            games,
+    fn new(cache_dir: PathBuf) -> Doorways {
+        Doorways {
+            games: Vec::new(),
             images: Vec::new(),
             image_folder: cache_dir.join("images"),
             display_filter: DisplayFilter::All,
             display_installed: None,
             displayed_games: Vec::new(),
             edit_mode: false,
+            allow_filter: false,
             background_color: None,
-        };
+        }
+    }
+
+    fn load(cache_dir: PathBuf) -> Result<Doorways, Error> {
+        let games: Vec<Game> =
+            serde_json::from_str(fs::read_to_string(cache_dir.join("games.json"))?.as_str())?;
+        let mut doorways = Doorways::new(cache_dir);
+        doorways.games = games;
         doorways.sort();
         doorways.update_filter(DisplayFilter::All);
         Ok(doorways)
@@ -146,6 +171,7 @@ impl Doorways {
                     custom.title = orig.title.clone();
                     custom.image_src = orig.image_src.clone();
                     custom.install_directory = orig.install_directory.clone();
+                    custom.working_subdir_override = orig.working_subdir_override.clone();
                     custom.installed = orig.installed.clone();
                     custom.command = orig.command.clone();
                     custom.args = orig.args.clone();
@@ -178,6 +204,7 @@ impl Doorways {
                 args: None,
                 image_path: None,
                 install_directory: None,
+                working_subdir_override: None,
             })
             .collect();
         let mut doorways = Doorways {
@@ -188,6 +215,7 @@ impl Doorways {
             images: Vec::new(),
             image_folder,
             edit_mode: false,
+            allow_filter: false,
             background_color: None,
         };
         doorways.sort();
@@ -195,36 +223,22 @@ impl Doorways {
         doorways
     }
 
-    fn from_twitch_db(image_folder: PathBuf, twitch_db: &TwitchDb) -> Doorways {
-        let products = &twitch_db.products;
-        let installs = &twitch_db.installs;
-        let games: Vec<Game> = products
+    fn from_twitch_games(image_folder: PathBuf, games: &Vec<TwitchGame>) -> Doorways {
+        let games = games
             .iter()
-            .map(|p| {
-                let mut installed = false;
-                let mut install_directory = None;
-                let install_record: Vec<&Install> = installs
-                    .iter()
-                    .filter(|i| i.product_asin == p.product_asin)
-                    .collect();
-                if install_record.len() == 1 {
-                    let install_record = install_record[0];
-                    installed = install_record.installed == 1;
-                    install_directory = Some(install_record.install_directory.clone());
-                }
-                Game {
-                    id: p.product_asin.clone(),
-                    title: p.product_title.clone(),
-                    image_src: ImageSource::Url(p.product_icon_url.clone()),
-                    installed,
-                    install_directory,
-                    kids: None,
-                    players: None,
-                    command: None,
-                    args: None,
-                    image_path: None,
-                    launch_url: None,
-                }
+            .map(|g| Game {
+                id: g.asin.to_string(),
+                title: g.title.clone(),
+                image_src: ImageSource::Url(g.image_url.clone()),
+                installed: g.installed,
+                install_directory: g.install_directory.clone(),
+                working_subdir_override: g.working_subdir_override.clone(),
+                command: g.command.clone(),
+                args: g.args.clone(),
+                kids: None,
+                players: None,
+                image_path: None,
+                launch_url: None,
             })
             .collect();
         let mut doorways = Doorways {
@@ -235,10 +249,11 @@ impl Doorways {
             images: Vec::new(),
             image_folder,
             edit_mode: false,
+            allow_filter: false,
             background_color: None,
         };
         doorways.sort();
-        doorways.update_filter(DisplayFilter::Kids);
+        doorways.update_filter(DisplayFilter::All);
         doorways
     }
 
@@ -326,15 +341,24 @@ impl TileHandler for Doorways {
             }
         }
 
-        if _keymod.contains(KeyMods::CTRL) && keycode == KeyCode::E {
-            self.edit_mode = !self.edit_mode;
-            self.background_color = None;
-            if self.edit_mode {
-                self.update_filter(DisplayFilter::All);
-                self.background_color = Some(Color::from([0.2, 0.0, 0.2, 1.0]));
+        if _keymod.contains(KeyMods::CTRL) {
+            if keycode == KeyCode::E {
+                self.edit_mode = !self.edit_mode;
+                self.background_color = None;
+                if self.edit_mode {
+                    self.background_color = Some(Color::from([0.2, 0.0, 0.2, 1.0]));
+                }
+                return None;
             }
-            return None;
+            if keycode == KeyCode::F {
+                self.allow_filter = !self.allow_filter;
+                return None;
+            }
         };
+
+        if !self.allow_filter {
+            return Some((keycode, _keymod));
+        }
 
         match keycode {
             KeyCode::K => {
@@ -405,7 +429,6 @@ fn main() -> Result<(), Error> {
         .arg(
             Arg::with_name("refresh")
                 .long("refresh")
-                .takes_value(true)
                 .help("Refresh the list of games from source."),
         )
         .arg(
@@ -422,17 +445,25 @@ fn main() -> Result<(), Error> {
     let image_folder = &doorways_cache.join("images");
     let config = dirs::config_dir().unwrap();
     let mut doorways = if !doorways_cache.join("games.json").exists() {
+        Doorways::new(doorways_cache.clone())
+    } else {
+        Doorways::load(doorways_cache.clone())?
+    };
+    if matches.is_present("refresh") {
         eprintln!("Creating initial games list.");
         let app_infos = AppInfo::load()?;
         let games = SteamGame::from(&app_infos)?;
-        Doorways::from_steam_games(image_folder.to_path_buf(), games)
-    } else {
-        let twitch_cache = home.join(".twitch");
-
-        Doorways::load(doorways_cache.clone())?.merge_with(Doorways::from_twitch_db(
+        doorways = doorways.merge_with(Doorways::from_steam_games(
             image_folder.to_path_buf(),
-            &TwitchDb::load(&twitch_cache)?,
-        ))
+            games,
+        ));
+        let twitch_cache = home.join(".twitch");
+        let twitch_db = TwitchDb::load(&twitch_cache)?;
+        let games = TwitchGame::from_db(&twitch_db)?;
+        doorways = doorways.merge_with(Doorways::from_twitch_games(
+            image_folder.to_path_buf(),
+            &games,
+        ));
     };
 
     if matches.is_present("launcher") {
@@ -442,6 +473,7 @@ fn main() -> Result<(), Error> {
         doorways.load_imgs(&mut ctx)?;
         doorways.update_filter(DisplayFilter::Kids);
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
+        grid.allow_draw_tile = false;
         graphics::set_resizable(&mut ctx, true)?;
         event::run(&mut ctx, &mut event_loop, &mut grid)?;
         doorways.save(&doorways_cache)?;

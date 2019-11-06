@@ -4,6 +4,7 @@ use failure::{err_msg, Error};
 use ggez::event;
 use ggez::{
     self,
+    conf::{NumSamples, WindowSetup},
     event::{KeyCode, KeyMods},
     graphics::{self, Color},
     Context, GameResult,
@@ -467,7 +468,15 @@ fn main() -> Result<(), Error> {
     };
 
     if matches.is_present("launcher") {
-        let cb = ggez::ContextBuilder::new("Image Grid", "Joshua Benuck");
+        let cb = ggez::ContextBuilder::new("Doorways", "Joshua Benuck")
+            .window_setup(WindowSetup {
+                title: "Doorways".to_owned(),
+                samples: NumSamples::Zero,
+                vsync: true,
+                srgb: true,
+                icon: "/doorways.bmp".to_owned(),
+            })
+            .add_resource_path(env!("CARGO_MANIFEST_DIR"));
         let (mut ctx, mut event_loop) = cb.build()?;
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs(&mut ctx)?;

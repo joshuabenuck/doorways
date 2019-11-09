@@ -11,7 +11,12 @@ clap = "*"
 dirs = "*"
 failure = "*"
 glob = "*"
-ggez = "*"
+glutin = "*"
+piston = "*"
+piston2d-graphics = "*"
+pistoncore-glutin_window = "*"
+piston2d-opengl_graphics = "*"
+find_folder = "*"
 image = "*"
 reqwest = "*"
 serde = "*"
@@ -20,3 +25,6 @@ url = "*"
 image_grid = { path = "../image_grid" }
 twitch = { path = "../twitch" }
 steam = { path = "../steam" }
+
+[features]
+default = ["glutin/icon_loading"]

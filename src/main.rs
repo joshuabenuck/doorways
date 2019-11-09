@@ -1,17 +1,20 @@
 use clap::{App, Arg};
 use dirs;
 use failure::{err_msg, Error};
-use ggez::event;
-use ggez::{
-    self,
-    conf::{NumSamples, WindowSetup},
-    event::{KeyCode, KeyMods},
-    graphics::{self, Color},
-    Context, GameResult,
-};
+use glutin::Icon;
+use glutin_window::GlutinWindow as Window;
+use graphics::{DrawState, Graphics, Image, ImageSize, Transformed};
 use image;
-use image_grid;
-use image_grid::grid::{Grid, TileAction, TileHandler};
+use image_grid::grid::{Color, Grid, TileAction, TileHandler};
+use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
+use piston::event_loop::*;
+use piston::input::{
+    keyboard::{Key, ModifierKey},
+    mouse::MouseButton,
+    Button, MouseCursorEvent, MouseScrollEvent, PressEvent, ReleaseEvent, RenderArgs, RenderEvent,
+    UpdateEvent,
+};
+use piston::window::WindowSettings;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -124,11 +127,11 @@ struct Doorways {
     display_filter: DisplayFilter,
     display_installed: Option<bool>,
     displayed_games: Vec<usize>,
-    images: Vec<graphics::Image>,
+    images: Vec<Texture>,
     image_folder: PathBuf,
     edit_mode: bool,
     allow_filter: bool,
-    background_color: Option<graphics::Color>,
+    background_color: Option<Color>,
 }
 
 impl Doorways {
@@ -278,21 +281,29 @@ impl Doorways {
             .collect();
     }
 
-    fn load_imgs(&mut self, ctx: &mut Context) -> Result<&Doorways, Error> {
-        for game in &mut self.games {
+    fn load_imgs(&mut self) -> Result<&Doorways, Error> {
+        let mut unloadable = Vec::new();
+        for (index, game) in self.games.iter_mut().enumerate() {
             game.image_path = match &game.image_src {
                 ImageSource::Url(_) => Some(game.download_img(&self.image_folder).unwrap()),
                 ImageSource::Path(path) => Some(PathBuf::from(path)),
             };
-            let bytes = game.read_img(&game.image_path.as_ref().unwrap())?;
-            let image = image::load_from_memory(&bytes)?.to_rgba();
-            let (width, height) = image.dimensions();
-            self.images.push(graphics::Image::from_rgba8(
-                ctx,
-                width as u16,
-                height as u16,
-                &image,
-            )?);
+            let texture = match Texture::from_path(
+                &game.image_path.as_ref().unwrap(),
+                &TextureSettings::new(),
+            ) {
+                Ok(t) => Ok(t),
+                Err(msg) => Err(err_msg(msg)),
+            };
+            if texture.is_err() {
+                println!("{}", game.title);
+                unloadable.push(index);
+                continue;
+            }
+            self.images.push(texture?);
+        }
+        for index in unloadable {
+            self.games.remove(index);
         }
         Ok(self)
     }
@@ -310,7 +321,7 @@ impl TileHandler for Doorways {
         &self.displayed_games
     }
 
-    fn tile(&self, i: usize) -> &graphics::Image {
+    fn tile(&self, i: usize) -> &Texture {
         &self.images[i]
     }
 
@@ -321,20 +332,20 @@ impl TileHandler for Doorways {
     fn key_down(
         &mut self,
         i: usize,
-        keycode: KeyCode,
-        _keymod: KeyMods,
-    ) -> Option<(KeyCode, KeyMods)> {
+        keycode: Key,
+        keymod: ModifierKey,
+    ) -> Option<(Key, ModifierKey)> {
         if self.edit_mode {
             match keycode {
-                KeyCode::K => {
+                Key::K => {
                     self.games[i].kids = Some(true);
                     return None;
                 }
-                KeyCode::D => {
+                Key::D => {
                     self.games[i].kids = Some(false);
                     return None;
                 }
-                KeyCode::U => {
+                Key::U => {
                     self.games[i].kids = None;
                     return None;
                 }
@@ -342,40 +353,40 @@ impl TileHandler for Doorways {
             }
         }
 
-        if _keymod.contains(KeyMods::CTRL) {
-            if keycode == KeyCode::E {
+        if keymod.contains(ModifierKey::CTRL) {
+            if keycode == Key::E {
                 self.edit_mode = !self.edit_mode;
                 self.background_color = None;
                 if self.edit_mode {
-                    self.background_color = Some(Color::from([0.2, 0.0, 0.2, 1.0]));
+                    self.background_color = Some([0.2, 0.0, 0.2, 1.0]);
                 }
                 return None;
             }
-            if keycode == KeyCode::F {
+            if keycode == Key::F {
                 self.allow_filter = !self.allow_filter;
                 return None;
             }
         };
 
         if !self.allow_filter {
-            return Some((keycode, _keymod));
+            return Some((keycode, keymod));
         }
 
         match keycode {
-            KeyCode::K => {
+            Key::K => {
                 self.update_filter(DisplayFilter::Kids);
             }
-            KeyCode::D => {
+            Key::D => {
                 self.update_filter(DisplayFilter::Dad);
             }
-            KeyCode::U => {
+            Key::U => {
                 self.update_filter(DisplayFilter::NotInterested);
             }
-            KeyCode::A => {
+            Key::A => {
                 self.update_filter(DisplayFilter::All);
             }
-            KeyCode::I => {
-                if _keymod.contains(KeyMods::SHIFT) {
+            Key::I => {
+                if keymod.contains(ModifierKey::SHIFT) {
                     self.display_installed = None;
                 } else {
                     match self.display_installed {
@@ -385,25 +396,25 @@ impl TileHandler for Doorways {
                 }
                 self.update_filter(self.display_filter);
             }
-            _ => return Some((keycode, _keymod)),
+            _ => return Some((keycode, keymod)),
         }
         None
     }
 
-    fn highlight_color(&self, i: usize) -> graphics::Color {
+    fn highlight_color(&self, i: usize) -> Color {
         if let Some(kids) = self.games[i].kids {
             if kids {
-                return Color::from([0.0, 1.0, 0.0, 1.0]);
+                return [0.0, 1.0, 0.0, 1.0];
             }
             // not kids
-            return Color::from([1.0, 0.0, 0.0, 1.0]);
+            return [1.0, 0.0, 0.0, 1.0];
         }
         // unknown
-        return Color::from([0.5, 0.5, 0.5, 1.0]);
+        return [0.5, 0.5, 0.5, 1.0];
     }
 
-    fn background_color(&self) -> graphics::Color {
-        self.background_color.unwrap_or([0.1, 0.2, 0.3, 1.0].into())
+    fn background_color(&self) -> Color {
+        self.background_color.unwrap_or([0.1, 0.2, 0.3, 1.0])
     }
 }
 
@@ -468,23 +479,28 @@ fn main() -> Result<(), Error> {
     };
 
     if matches.is_present("launcher") {
-        let cb = ggez::ContextBuilder::new("Doorways", "Joshua Benuck")
-            .window_setup(WindowSetup {
-                title: "Doorways".to_owned(),
-                samples: NumSamples::Zero,
-                vsync: true,
-                srgb: true,
-                icon: "/doorways.bmp".to_owned(),
-            })
-            .add_resource_path(env!("CARGO_MANIFEST_DIR"));
-        let (mut ctx, mut event_loop) = cb.build()?;
+        // Change this to OpenGL::V2_1 if not working.
+        let opengl = OpenGL::V3_2;
+
+        // Create an Glutin window.
+        let mut window: Window = WindowSettings::new("Doorways", [800, 600])
+            .resizable(true)
+            .vsync(true)
+            .graphics_api(opengl)
+            .exit_on_esc(true)
+            .build()
+            .unwrap();
+
+        // set_window_icon(Icon::from_path(
+        //     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("/doorways.bmp"),
+        // ));
+        let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
-        doorways.load_imgs(&mut ctx)?;
+        doorways.load_imgs()?;
         doorways.update_filter(DisplayFilter::Kids);
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
         grid.allow_draw_tile = false;
-        graphics::set_resizable(&mut ctx, true)?;
-        event::run(&mut ctx, &mut event_loop, &mut grid)?;
+        grid.run(&mut window, &mut gl)?;
         doorways.save(&doorways_cache)?;
         return Ok(());
     }

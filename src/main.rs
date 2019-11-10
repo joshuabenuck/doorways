@@ -40,6 +40,7 @@ struct Game {
     image_src: ImageSource,
     installed: bool,
     kids: Option<bool>,
+    hidden: Option<bool>,
     players: Option<usize>,
     launch_url: Option<String>,
     install_directory: Option<String>,
@@ -127,7 +128,7 @@ struct Doorways {
     display_filter: DisplayFilter,
     display_installed: Option<bool>,
     displayed_games: Vec<usize>,
-    images: Vec<Texture>,
+    images: Vec<Option<Texture>>,
     image_folder: PathBuf,
     edit_mode: bool,
     allow_filter: bool,
@@ -183,6 +184,7 @@ impl Doorways {
                 }
             }
             if !found {
+                eprintln!("Added: {}", orig.title);
                 to_add.push(orig);
             }
         }
@@ -203,6 +205,7 @@ impl Doorways {
                 installed: g.installed,
                 launch_url: Some(format!("steam://rungameid/{}", g.id)),
                 kids: None,
+                hidden: Some(false),
                 players: None,
                 command: None,
                 args: None,
@@ -240,6 +243,7 @@ impl Doorways {
                 command: g.command.clone(),
                 args: g.args.clone(),
                 kids: None,
+                hidden: Some(false),
                 players: None,
                 image_path: None,
                 launch_url: None,
@@ -267,6 +271,7 @@ impl Doorways {
             .games
             .iter()
             .enumerate()
+            .filter(|(_i, g)| !g.hidden.unwrap_or(false))
             .filter(|(_i, g)| match self.display_installed {
                 Some(value) => g.installed == value,
                 None => true,
@@ -282,7 +287,6 @@ impl Doorways {
     }
 
     fn load_imgs(&mut self) -> Result<&Doorways, Error> {
-        let mut unloadable = Vec::new();
         for (index, game) in self.games.iter_mut().enumerate() {
             game.image_path = match &game.image_src {
                 ImageSource::Url(_) => Some(game.download_img(&self.image_folder).unwrap()),
@@ -296,14 +300,12 @@ impl Doorways {
                 Err(msg) => Err(err_msg(msg)),
             };
             if texture.is_err() {
-                println!("{}", game.title);
-                unloadable.push(index);
+                eprintln!("Unable to load: {}", game.title);
+                game.hidden = Some(true);
+                self.images.push(None);
                 continue;
             }
-            self.images.push(texture?);
-        }
-        for index in unloadable {
-            self.games.remove(index);
+            self.images.push(Some(texture?));
         }
         Ok(self)
     }
@@ -322,7 +324,7 @@ impl TileHandler for Doorways {
     }
 
     fn tile(&self, i: usize) -> &Texture {
-        &self.images[i]
+        self.images[i].as_ref().unwrap()
     }
 
     fn act(&self, i: usize) -> TileAction {
@@ -335,18 +337,19 @@ impl TileHandler for Doorways {
         keycode: Key,
         keymod: ModifierKey,
     ) -> Option<(Key, ModifierKey)> {
+        let game_index = self.tiles()[i];
         if self.edit_mode {
             match keycode {
                 Key::K => {
-                    self.games[i].kids = Some(true);
+                    self.games[game_index].kids = Some(true);
                     return None;
                 }
                 Key::D => {
-                    self.games[i].kids = Some(false);
+                    self.games[game_index].kids = Some(false);
                     return None;
                 }
                 Key::U => {
-                    self.games[i].kids = None;
+                    self.games[game_index].kids = None;
                     return None;
                 }
                 _ => {}
@@ -386,14 +389,14 @@ impl TileHandler for Doorways {
                 self.update_filter(DisplayFilter::All);
             }
             Key::I => {
-                if keymod.contains(ModifierKey::SHIFT) {
-                    self.display_installed = None;
+                self.display_installed = if keymod.contains(ModifierKey::SHIFT) {
+                    None
                 } else {
                     match self.display_installed {
-                        None => self.display_installed = Some(true),
-                        Some(value) => self.display_installed = Some(!value),
+                        None => Some(true),
+                        Some(value) => Some(!value),
                     }
-                }
+                };
                 self.update_filter(self.display_filter);
             }
             _ => return Some((keycode, keymod)),
@@ -455,7 +458,6 @@ fn main() -> Result<(), Error> {
     let home = dirs::home_dir().unwrap();
     let doorways_cache = home.join(".doorways");
     let image_folder = &doorways_cache.join("images");
-    let config = dirs::config_dir().unwrap();
     let mut doorways = if !doorways_cache.join("games.json").exists() {
         Doorways::new(doorways_cache.clone())
     } else {
@@ -465,6 +467,7 @@ fn main() -> Result<(), Error> {
         eprintln!("Creating initial games list.");
         let app_infos = AppInfo::load()?;
         let games = SteamGame::from(&app_infos)?;
+        eprintln!("Steam games: {}", games.len());
         doorways = doorways.merge_with(Doorways::from_steam_games(
             image_folder.to_path_buf(),
             games,
@@ -472,6 +475,7 @@ fn main() -> Result<(), Error> {
         let twitch_cache = home.join(".twitch");
         let twitch_db = TwitchDb::load(&twitch_cache)?;
         let games = TwitchGame::from_db(&twitch_db)?;
+        eprintln!("Twitch games: {}", games.len());
         doorways = doorways.merge_with(Doorways::from_twitch_games(
             image_folder.to_path_buf(),
             &games,
@@ -497,10 +501,12 @@ fn main() -> Result<(), Error> {
         let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;
-        doorways.update_filter(DisplayFilter::Kids);
+        doorways.update_filter(DisplayFilter::All);
+        eprintln!("Current game count: {}", doorways.games.len());
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
         grid.allow_draw_tile = false;
         grid.run(&mut window, &mut gl)?;
+        eprintln!("Game count before save: {}", doorways.games.len());
         doorways.save(&doorways_cache)?;
         return Ok(());
     }
@@ -524,7 +530,7 @@ fn main() -> Result<(), Error> {
                 return Ok(());
             }
         }
-        println!("Unable to find game {}", game_to_launch);
+        eprintln!("Unable to find game {}", game_to_launch);
         return Ok(());
     }
 

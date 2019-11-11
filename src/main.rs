@@ -14,7 +14,7 @@ use piston::input::{
     Button, MouseCursorEvent, MouseScrollEvent, PressEvent, ReleaseEvent, RenderArgs, RenderEvent,
     UpdateEvent,
 };
-use piston::window::WindowSettings;
+use piston::window::{AdvancedWindow, WindowSettings};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -142,7 +142,7 @@ impl Doorways {
             images: Vec::new(),
             image_folder: cache_dir.join("images"),
             display_filter: DisplayFilter::All,
-            display_installed: None,
+            display_installed: Some(true),
             displayed_games: Vec::new(),
             edit_mode: false,
             allow_filter: false,
@@ -287,7 +287,7 @@ impl Doorways {
     }
 
     fn load_imgs(&mut self) -> Result<&Doorways, Error> {
-        for (index, game) in self.games.iter_mut().enumerate() {
+        for (_index, game) in self.games.iter_mut().enumerate() {
             game.image_path = match &game.image_src {
                 ImageSource::Url(_) => Some(game.download_img(&self.image_folder).unwrap()),
                 ImageSource::Path(path) => Some(PathBuf::from(path)),
@@ -319,6 +319,29 @@ impl Doorways {
 }
 
 impl TileHandler for Doorways {
+    fn window_title(&self) -> String {
+        let lock = match self.allow_filter {
+            true => "🔑",
+            false => "🔒",
+        };
+        let install_filter = match self.display_installed {
+            None => "",
+            Some(true) => "[Installed]",
+            Some(false) => "[Not Installed]",
+        };
+        let filter = match &self.display_filter {
+            DisplayFilter::All => "All",
+            DisplayFilter::Dad => "Dad",
+            DisplayFilter::Kids => "Kids",
+            DisplayFilter::NotInterested => "Unknown",
+        };
+        let count = self.displayed_games.len();
+        format!(
+            "Doorways {} (Filter: {}{}{})",
+            count, filter, install_filter, lock
+        )
+    }
+
     fn tiles(&self) -> &Vec<usize> {
         &self.displayed_games
     }
@@ -494,14 +517,14 @@ fn main() -> Result<(), Error> {
             .exit_on_esc(true)
             .build()
             .unwrap();
-
-        // set_window_icon(Icon::from_path(
-        //     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("/doorways.bmp"),
-        // ));
+        window.ctx.window().set_window_icon(Some(Icon::from_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("doorways.bmp"),
+        )?));
         let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;
-        doorways.update_filter(DisplayFilter::All);
+        doorways.update_filter(DisplayFilter::Kids);
+        window.set_title(doorways.window_title());
         eprintln!("Current game count: {}", doorways.games.len());
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
         grid.allow_draw_tile = false;

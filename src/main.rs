@@ -517,9 +517,11 @@ fn main() -> Result<(), Error> {
             .exit_on_esc(true)
             .build()
             .unwrap();
-        window.ctx.window().set_window_icon(Some(Icon::from_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("doorways.bmp"),
-        )?));
+        let doorways_bytes = include_bytes!("../doorways.bmp");
+        window
+            .ctx
+            .window()
+            .set_window_icon(Some(Icon::from_bytes(doorways_bytes)?));
         let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;

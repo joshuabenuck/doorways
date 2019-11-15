@@ -246,7 +246,7 @@ impl Doorways {
                 hidden: Some(false),
                 players: None,
                 image_path: None,
-                launch_url: None,
+                launch_url: g.launch_url.clone(),
             })
             .collect();
         let mut doorways = Doorways {

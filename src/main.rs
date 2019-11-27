@@ -1,3 +1,6 @@
+// #![windows_subsystem = "windows"]
+// Uncomment to turn off console window completely.
+
 use clap::{App, Arg};
 use dirs;
 use failure::{err_msg, Error};
@@ -6,6 +9,7 @@ use glutin_window::GlutinWindow as Window;
 use graphics::{DrawState, Graphics, Image, ImageSize, Transformed};
 use image;
 use image_grid::grid::{Color, Grid, TileAction, TileHandler};
+use kernel32;
 use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
 use piston::event_loop::*;
 use piston::input::{
@@ -22,9 +26,12 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use steam::{app_info::AppInfo, steam_game::SteamGame};
+use std::ptr;
+use steam::{app_info::AppInfo, package_info::PackageInfo, steam_game::SteamGame};
 use twitch::{TwitchDb, TwitchGame};
 use url::Url;
+use user32;
+use winapi;
 
 #[derive(Deserialize, Serialize, Clone)]
 enum ImageSource {
@@ -197,7 +204,7 @@ impl Doorways {
         // Still need to figure out which ones are noise and which are not.
         let games = games
             .iter()
-            .filter(|g| g.installed)
+            .filter(|g| !g.logo.is_none())
             .map(|g| Game {
                 id: g.id.to_string(),
                 title: g.title.clone(),
@@ -444,6 +451,14 @@ impl TileHandler for Doorways {
     }
 }
 
+fn hide_console_window() {
+    let window = unsafe { kernel32::GetConsoleWindow() };
+    // https://msdn.microsoft.com/en-us/library/windows/desktop/ms633548%28v=vs.85%29.aspx
+    if window != ptr::null_mut() {
+        unsafe { user32::ShowWindow(window, winapi::um::winuser::SW_HIDE) };
+    }
+}
+
 fn main() -> Result<(), Error> {
     let matches = App::new("doorways")
         .about("A unified launcher for common game libraries.")
@@ -478,6 +493,9 @@ fn main() -> Result<(), Error> {
         )
         .get_matches();
 
+    if matches.is_present("launcher") {
+        hide_console_window();
+    }
     let home = dirs::home_dir().unwrap();
     let doorways_cache = home.join(".doorways");
     let image_folder = &doorways_cache.join("images");
@@ -489,7 +507,8 @@ fn main() -> Result<(), Error> {
     if matches.is_present("refresh") {
         eprintln!("Creating initial games list.");
         let app_infos = AppInfo::load()?;
-        let games = SteamGame::from(&app_infos)?;
+        let pkg_infos = PackageInfo::load()?;
+        let games = SteamGame::from(&app_infos, &pkg_infos)?;
         eprintln!("Steam games: {}", games.len());
         doorways = doorways.merge_with(Doorways::from_steam_games(
             image_folder.to_path_buf(),
@@ -517,11 +536,9 @@ fn main() -> Result<(), Error> {
             .exit_on_esc(true)
             .build()
             .unwrap();
-        let doorways_bytes = include_bytes!("../doorways.bmp");
-        window
-            .ctx
-            .window()
-            .set_window_icon(Some(Icon::from_bytes(doorways_bytes)?));
+        // Not needed if icon is in exe.
+        // let doorways_bytes = include_bytes!("../doorways.bmp");
+        // window.ctx.window().set_window_icon(Some(Icon::from_bytes(doorways_bytes)?));
         let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;

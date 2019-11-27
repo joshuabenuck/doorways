@@ -98,10 +98,15 @@ impl Game {
             let install_directory = PathBuf::from(
                 self.install_directory
                     .as_ref()
-                    .expect("Unable to launch game"),
+                    .expect("launch: Unable to get install directory"),
             );
-            let full_command =
-                PathBuf::from(install_directory.join(self.command.as_ref().unwrap()));
+            let full_command = PathBuf::from(
+                install_directory.join(
+                    self.command
+                        .as_ref()
+                        .expect("launch: Unable to get command"),
+                ),
+            );
             let mut launch = Command::new(&full_command);
             if self.working_subdir_override.is_some() {
                 launch.current_dir(
@@ -110,7 +115,9 @@ impl Game {
             } else {
                 launch.current_dir(install_directory);
             }
-            launch.args(self.args.as_ref().unwrap());
+            if self.args.is_some() {
+                launch.args(self.args.as_ref().unwrap());
+            }
             return Ok(launch.spawn()?);
         }
         if self.launch_url.is_some() {

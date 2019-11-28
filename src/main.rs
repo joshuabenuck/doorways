@@ -4,24 +4,17 @@
 use clap::{App, Arg};
 use dirs;
 use failure::{err_msg, Error};
-use glutin::Icon;
 use glutin_window::GlutinWindow as Window;
-use graphics::{DrawState, Graphics, Image, ImageSize, Transformed};
-use image;
+use graphics::{math::Matrix2d, DrawState, Image, Transformed};
 use image_grid::grid::{Color, Grid, TileAction, TileHandler};
 use kernel32;
 use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
-use piston::event_loop::*;
-use piston::input::{
-    keyboard::{Key, ModifierKey},
-    mouse::MouseButton,
-    Button, MouseCursorEvent, MouseScrollEvent, PressEvent, ReleaseEvent, RenderArgs, RenderEvent,
-    UpdateEvent,
-};
+use piston::input::keyboard::{Key, ModifierKey};
 use piston::window::{AdvancedWindow, WindowSettings};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -39,6 +32,19 @@ enum ImageSource {
     Path(String),
 }
 
+#[derive(Deserialize, Serialize, PartialEq, Eq, Hash, Clone)]
+enum Launcher {
+    Steam,
+    Twitch,
+    Unknown,
+}
+
+impl Default for Launcher {
+    fn default() -> Self {
+        Launcher::Unknown
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct Game {
     id: String,
@@ -54,6 +60,8 @@ struct Game {
     working_subdir_override: Option<String>,
     command: Option<String>,
     args: Option<Vec<String>>,
+    #[serde(default)]
+    launcher: Launcher,
 }
 
 impl Game {
@@ -79,10 +87,6 @@ impl Game {
         resp.read_to_end(&mut buffer)?;
         fs::write(&image, buffer)?;
         Ok(image)
-    }
-
-    fn read_img(&self, full_path: &PathBuf) -> Result<Vec<u8>, Error> {
-        Ok(fs::read(&full_path)?)
     }
 
     fn launch(&self) -> Result<Child, Error> {
@@ -129,6 +133,88 @@ impl Game {
     }
 }
 
+fn from_twitch(games: Vec<TwitchGame>) -> Vec<Game> {
+    games
+        .iter()
+        .map(|g| Game {
+            id: g.asin.to_string(),
+            title: g.title.clone(),
+            image_src: ImageSource::Url(g.image_url.clone()),
+            installed: g.installed,
+            install_directory: g.install_directory.clone(),
+            working_subdir_override: g.working_subdir_override.clone(),
+            command: g.command.clone(),
+            args: g.args.clone(),
+            kids: None,
+            hidden: Some(false),
+            players: None,
+            image_path: None,
+            launch_url: g.launch_url.clone(),
+            launcher: Launcher::Twitch,
+        })
+        .collect()
+}
+
+fn from_steam(games: Vec<SteamGame>) -> Vec<Game> {
+    // Not able to do anything useful with uninstalled Steam game records yet.
+    // Still need to figure out which ones are noise and which are not.
+    let games: Vec<Game> = games
+        .iter()
+        .filter(|g| !g.logo.is_none())
+        .map(|g| Game {
+            id: g.id.to_string(),
+            title: g.title.clone(),
+            image_src: ImageSource::Path(g.logo.as_ref().unwrap().clone()),
+            installed: g.installed,
+            launch_url: Some(format!("steam://rungameid/{}", g.id)),
+            kids: None,
+            hidden: Some(false),
+            players: None,
+            command: None,
+            args: None,
+            image_path: None,
+            install_directory: None,
+            working_subdir_override: None,
+            launcher: Launcher::Steam,
+        })
+        .collect();
+    println!("Steam -- {}", games.len());
+    games
+}
+
+trait VecGame {
+    fn merge_with(self, other: Vec<Game>) -> Self;
+}
+
+impl VecGame for Vec<Game> {
+    fn merge_with(mut self, other: Vec<Game>) -> Self {
+        let mut to_add: Vec<Game> = Vec::new();
+        for orig in other.into_iter() {
+            let mut found = false;
+            for custom in self.iter_mut() {
+                if orig.id == custom.id {
+                    found = true;
+                    custom.title = orig.title.clone();
+                    custom.image_src = orig.image_src.clone();
+                    custom.install_directory = orig.install_directory.clone();
+                    custom.working_subdir_override = orig.working_subdir_override.clone();
+                    custom.installed = orig.installed.clone();
+                    custom.command = orig.command.clone();
+                    custom.args = orig.args.clone();
+                    custom.launch_url = orig.launch_url.clone();
+                    custom.launcher = orig.launcher.clone();
+                }
+            }
+            if !found {
+                eprintln!("Added: {}", orig.title);
+                to_add.push(orig);
+            }
+        }
+        self.extend(to_add);
+        self
+    }
+}
+
 #[derive(Copy, Clone)]
 enum DisplayFilter {
     All,
@@ -147,10 +233,12 @@ struct Doorways {
     edit_mode: bool,
     allow_filter: bool,
     background_color: Option<Color>,
+    icons: HashMap<Launcher, Texture>,
 }
 
 impl Doorways {
     fn new(cache_dir: PathBuf) -> Doorways {
+        let icons = HashMap::new();
         Doorways {
             games: Vec::new(),
             images: Vec::new(),
@@ -161,6 +249,7 @@ impl Doorways {
             edit_mode: false,
             allow_filter: false,
             background_color: None,
+            icons,
         }
     }
 
@@ -178,105 +267,6 @@ impl Doorways {
         fs::File::create(cache_dir.join("games.json"))?
             .write(serde_json::to_string_pretty(&self.games)?.as_bytes())?;
         Ok(())
-    }
-
-    fn merge_with(mut self, other: Doorways) -> Doorways {
-        let mut to_add: Vec<Game> = Vec::new();
-        for orig in other.games.into_iter() {
-            let mut found = false;
-            for custom in &mut self.games {
-                if orig.id == custom.id {
-                    found = true;
-                    custom.title = orig.title.clone();
-                    custom.image_src = orig.image_src.clone();
-                    custom.install_directory = orig.install_directory.clone();
-                    custom.working_subdir_override = orig.working_subdir_override.clone();
-                    custom.installed = orig.installed.clone();
-                    custom.command = orig.command.clone();
-                    custom.args = orig.args.clone();
-                    custom.launch_url = orig.launch_url.clone();
-                }
-            }
-            if !found {
-                eprintln!("Added: {}", orig.title);
-                to_add.push(orig);
-            }
-        }
-        self.games.extend(to_add);
-        self
-    }
-
-    fn from_steam_games(image_folder: PathBuf, games: Vec<SteamGame>) -> Doorways {
-        // Not able to do anything useful with uninstalled Steam game records yet.
-        // Still need to figure out which ones are noise and which are not.
-        let games = games
-            .iter()
-            .filter(|g| !g.logo.is_none())
-            .map(|g| Game {
-                id: g.id.to_string(),
-                title: g.title.clone(),
-                image_src: ImageSource::Path(g.logo.as_ref().unwrap().clone()),
-                installed: g.installed,
-                launch_url: Some(format!("steam://rungameid/{}", g.id)),
-                kids: None,
-                hidden: Some(false),
-                players: None,
-                command: None,
-                args: None,
-                image_path: None,
-                install_directory: None,
-                working_subdir_override: None,
-            })
-            .collect();
-        let mut doorways = Doorways {
-            games,
-            display_filter: DisplayFilter::All,
-            displayed_games: Vec::new(),
-            display_installed: Some(true),
-            images: Vec::new(),
-            image_folder,
-            edit_mode: false,
-            allow_filter: false,
-            background_color: None,
-        };
-        doorways.sort();
-        doorways.update_filter(DisplayFilter::All);
-        doorways
-    }
-
-    fn from_twitch_games(image_folder: PathBuf, games: &Vec<TwitchGame>) -> Doorways {
-        let games = games
-            .iter()
-            .map(|g| Game {
-                id: g.asin.to_string(),
-                title: g.title.clone(),
-                image_src: ImageSource::Url(g.image_url.clone()),
-                installed: g.installed,
-                install_directory: g.install_directory.clone(),
-                working_subdir_override: g.working_subdir_override.clone(),
-                command: g.command.clone(),
-                args: g.args.clone(),
-                kids: None,
-                hidden: Some(false),
-                players: None,
-                image_path: None,
-                launch_url: g.launch_url.clone(),
-            })
-            .collect();
-        let mut doorways = Doorways {
-            games,
-            display_filter: DisplayFilter::All,
-            displayed_games: Vec::new(),
-            display_installed: Some(true),
-            images: Vec::new(),
-            image_folder,
-            edit_mode: false,
-            allow_filter: false,
-            background_color: None,
-        };
-        doorways.sort();
-        doorways.update_filter(DisplayFilter::All);
-        doorways
     }
 
     fn update_filter(&mut self, df: DisplayFilter) {
@@ -329,6 +319,10 @@ impl Doorways {
         self.games
             .sort_unstable_by(|e1, e2| e1.title.cmp(&e2.title));
         self.images.clear();
+    }
+
+    fn icon(&self, i: usize) -> Option<&Texture> {
+        self.icons.get(&self.games[i].launcher)
     }
 }
 
@@ -456,6 +450,50 @@ impl TileHandler for Doorways {
     fn background_color(&self) -> Color {
         self.background_color.unwrap_or([0.1, 0.2, 0.3, 1.0])
     }
+
+    fn draw_tile(
+        &self,
+        i: usize,
+        transform: Matrix2d,
+        gl: &mut GlGraphics,
+        target_width: usize,
+        target_height: usize,
+    ) {
+        let image = self.tile(i);
+        let (scale, width, height) = self.compute_size(&image, target_width, target_height);
+        let x_image_margin = (target_width - width) / 2;
+        let y_image_margin = (target_height - height) / 2;
+
+        let state = DrawState::default();
+        Image::new().draw(
+            image,
+            &state,
+            transform
+                .trans(x_image_margin as f64, y_image_margin as f64)
+                .zoom(scale.into()),
+            gl,
+        );
+        match self.icon(i) {
+            Some(icon) => {
+                let (iscale, iwidth, iheight) = self.compute_size(icon, 20, 20);
+                Image::new().draw(
+                    icon,
+                    &state,
+                    transform
+                        .trans(
+                            (x_image_margin + width - iwidth as usize - 2) as f64,
+                            (y_image_margin + height - iheight as usize - 2) as f64,
+                        )
+                        .zoom(iscale),
+                    gl,
+                );
+                // let rect = graphics::rectangle::Rectangle::new([1.0, 0.5, 1.0, 1.0]);
+                // let transform = transform.trans(50.0, 0.0);
+                // rect.draw([0.0, 0.0, 50.0, 50.0], &state, transform, gl);
+            }
+            None => {}
+        }
+    }
 }
 
 fn hide_console_window() {
@@ -505,7 +543,6 @@ fn main() -> Result<(), Error> {
     }
     let home = dirs::home_dir().unwrap();
     let doorways_cache = home.join(".doorways");
-    let image_folder = &doorways_cache.join("images");
     let mut doorways = if !doorways_cache.join("games.json").exists() {
         Doorways::new(doorways_cache.clone())
     } else {
@@ -515,20 +552,14 @@ fn main() -> Result<(), Error> {
         eprintln!("Creating initial games list.");
         let app_infos = AppInfo::load()?;
         let pkg_infos = PackageInfo::load()?;
-        let games = SteamGame::from(&app_infos, &pkg_infos)?;
-        eprintln!("Steam games: {}", games.len());
-        doorways = doorways.merge_with(Doorways::from_steam_games(
-            image_folder.to_path_buf(),
-            games,
-        ));
+        let steam = from_steam(SteamGame::from(&app_infos, &pkg_infos)?);
+        eprintln!("Steam games: {}", steam.len());
+        doorways.games = doorways.games.merge_with(steam);
         let twitch_cache = home.join(".twitch");
         let twitch_db = TwitchDb::load(&twitch_cache)?;
-        let games = TwitchGame::from_db(&twitch_db)?;
-        eprintln!("Twitch games: {}", games.len());
-        doorways = doorways.merge_with(Doorways::from_twitch_games(
-            image_folder.to_path_buf(),
-            &games,
-        ));
+        let twitch = from_twitch(TwitchGame::from_db(&twitch_db)?);
+        eprintln!("Twitch games: {}", twitch.len());
+        doorways.games = doorways.games.merge_with(twitch);
     };
 
     if matches.is_present("launcher") {
@@ -550,6 +581,25 @@ fn main() -> Result<(), Error> {
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;
         doorways.update_filter(DisplayFilter::Kids);
+        let settings = TextureSettings::new().filter(texture::Filter::Linear);
+        doorways.icons.insert(
+            Launcher::Steam,
+            Texture::from_image(
+                &image::load_from_memory(include_bytes!("../steam.ico"))
+                    .expect("Unable to load steam icon.")
+                    .to_rgba(),
+                &settings,
+            ),
+        );
+        doorways.icons.insert(
+            Launcher::Twitch,
+            Texture::from_image(
+                &image::load_from_memory(include_bytes!("../twitch.ico"))
+                    .expect("Unable to load twitch icon.")
+                    .to_rgba(),
+                &settings,
+            ),
+        );
         window.set_title(doorways.window_title());
         eprintln!("Current game count: {}", doorways.games.len());
         let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);

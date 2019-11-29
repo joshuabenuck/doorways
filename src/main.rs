@@ -6,7 +6,7 @@ use dirs;
 use failure::{err_msg, Error};
 use glutin_window::GlutinWindow as Window;
 use graphics::{math::Matrix2d, DrawState, Image, Transformed};
-use image_grid::grid::{Color, Grid, TileAction, TileHandler};
+use image_grid::grid::{Color, Grid, TileHandler};
 use kernel32;
 use opengl_graphics::{GlGraphics, OpenGL, Texture, TextureSettings};
 use piston::input::keyboard::{Key, ModifierKey};
@@ -20,6 +20,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::ptr;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, sleep};
+use std::time::Duration;
 use steam::{app_info::AppInfo, package_info::PackageInfo, steam_game::SteamGame};
 use twitch::{TwitchDb, TwitchGame};
 use url::Url;
@@ -223,8 +226,16 @@ enum DisplayFilter {
     NotInterested,
 }
 
+enum LaunchStatus {
+    Running,
+    Success,
+    FailedToLaunch(Error),
+    Error(i32),
+}
+
 struct Doorways {
     games: Vec<Game>,
+    status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
     display_filter: DisplayFilter,
     display_installed: Option<bool>,
     displayed_games: Vec<usize>,
@@ -234,6 +245,8 @@ struct Doorways {
     allow_filter: bool,
     background_color: Option<Color>,
     icons: HashMap<Launcher, Texture>,
+    status_channel: Option<mpsc::Sender<(usize, Child)>>,
+    show_overlay: bool,
 }
 
 impl Doorways {
@@ -241,6 +254,7 @@ impl Doorways {
         let icons = HashMap::new();
         Doorways {
             games: Vec::new(),
+            status: Arc::new(Mutex::new(HashMap::new())),
             images: Vec::new(),
             image_folder: cache_dir.join("images"),
             display_filter: DisplayFilter::All,
@@ -250,6 +264,8 @@ impl Doorways {
             allow_filter: false,
             background_color: None,
             icons,
+            status_channel: None,
+            show_overlay: false,
         }
     }
 
@@ -324,6 +340,86 @@ impl Doorways {
     fn icon(&self, i: usize) -> Option<&Texture> {
         self.icons.get(&self.games[i].launcher)
     }
+
+    fn start_status_thread(&mut self) {
+        if self.status_channel.is_some() {
+            return ();
+        }
+        let (tx, rx) = mpsc::channel::<(usize, Child)>();
+        self.status_channel = Some(tx);
+        let status = self.status.clone();
+        thread::spawn(move || {
+            ChildMonitor::new(rx, status).process();
+        });
+    }
+}
+
+struct ChildMonitor {
+    active: HashMap<usize, Child>,
+    rx: mpsc::Receiver<(usize, Child)>,
+    status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
+}
+
+impl ChildMonitor {
+    fn new(
+        rx: mpsc::Receiver<(usize, Child)>,
+        status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
+    ) -> ChildMonitor {
+        ChildMonitor {
+            active: HashMap::new(),
+            rx,
+            status,
+        }
+    }
+
+    fn poll_active(&mut self) {
+        let mut to_remove = Vec::<usize>::new();
+        for (i, child) in self.active.iter_mut() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => {
+                    to_remove.push(*i);
+                    self.status.lock().unwrap().insert(
+                        *i,
+                        if exit_status.success() {
+                            LaunchStatus::Success
+                        } else {
+                            LaunchStatus::Error(
+                                exit_status.code().expect("Unable to get exit code"),
+                            )
+                        },
+                    );
+                }
+                Ok(None) => {
+                    self.status
+                        .lock()
+                        .unwrap()
+                        .insert(*i, LaunchStatus::Running);
+                }
+                Err(err) => panic!("Error waiting on child: {}", err),
+            }
+        }
+        for i in to_remove {
+            self.active.remove(&i).expect("Unable to remove.");
+        }
+    }
+
+    fn process(&mut self) {
+        loop {
+            match self.rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.poll_active();
+                    sleep(Duration::from_secs(1));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Should never happen.
+                    panic!("Unexpected disconnection");
+                }
+                Ok((i, child)) => {
+                    self.active.insert(i, child);
+                }
+            }
+        }
+    }
 }
 
 impl TileHandler for Doorways {
@@ -358,8 +454,28 @@ impl TileHandler for Doorways {
         self.images[i].as_ref().unwrap()
     }
 
-    fn act(&self, i: usize) -> TileAction {
-        TileAction::Launch(self.games[i].launch())
+    fn act(&mut self, i: usize) {
+        self.start_status_thread();
+        match &self.status_channel {
+            None => panic!("Unable to start status thread!"),
+            Some(tx) => {
+                let result = self.games[i].launch();
+                match result {
+                    Ok(child) => {
+                        tx.send((i, child))
+                            .unwrap_or_else(|err| panic!("Unable to send to thread: {}", err));
+                        ()
+                    }
+                    Err(err) => {
+                        self.status
+                            .lock()
+                            .unwrap()
+                            .insert(i, LaunchStatus::FailedToLaunch(err));
+                        ()
+                    }
+                };
+            }
+        };
     }
 
     fn key_down(
@@ -387,6 +503,11 @@ impl TileHandler for Doorways {
             }
         }
 
+        if keymod.contains(ModifierKey::CTRL) {
+            if keycode == Key::O {
+                self.show_overlay = !self.show_overlay;
+            }
+        }
         if keymod.contains(ModifierKey::CTRL) {
             if keycode == Key::E {
                 self.edit_mode = !self.edit_mode;
@@ -473,6 +594,9 @@ impl TileHandler for Doorways {
                 .zoom(scale.into()),
             gl,
         );
+        if self.show_overlay == false {
+            return ();
+        }
         match self.icon(i) {
             Some(icon) => {
                 let (iscale, iwidth, iheight) = self.compute_size(icon, 20, 20);
@@ -487,12 +611,29 @@ impl TileHandler for Doorways {
                         .zoom(iscale),
                     gl,
                 );
-                // let rect = graphics::rectangle::Rectangle::new([1.0, 0.5, 1.0, 1.0]);
-                // let transform = transform.trans(50.0, 0.0);
-                // rect.draw([0.0, 0.0, 50.0, 50.0], &state, transform, gl);
             }
             None => {}
         }
+        let color = {
+            let mut statuses = self.status.lock().unwrap();
+            let status = statuses.get_mut(&i);
+            if status.is_none() {
+                return ();
+            }
+            match status.unwrap() {
+                LaunchStatus::Running => [0.0, 1.0, 0.0, 1.0],
+                LaunchStatus::Success => [1.0, 0.0, 1.0, 1.0],
+                LaunchStatus::Error(_) => [1.0, 0.0, 0.0, 1.0],
+                LaunchStatus::FailedToLaunch(_) => [0.8, 0.8, 0.8, 1.0],
+            }
+        };
+        let transform = transform.trans(
+            (x_image_margin + 3) as f64,
+            (y_image_margin + height - 20 - 3) as f64,
+        );
+        //let rect = graphics::rectangle::Rectangle::new(color);
+        //rect.draw([0.0, 0.0, 20.0, 20.0], &state, transform, gl);
+        graphics::ellipse(color, [0.0, 0.0, 20.0, 20.0], transform, gl);
     }
 }
 

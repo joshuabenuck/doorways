@@ -4,6 +4,7 @@
 use clap::{App, Arg};
 use dirs;
 use failure::{err_msg, Error};
+use glutin::Icon;
 use glutin_window::GlutinWindow as Window;
 use graphics::{math::Matrix2d, DrawState, Image, Transformed};
 use image_grid::grid::{Color, Grid, TileHandler};
@@ -715,9 +716,12 @@ fn main() -> Result<(), Error> {
             .exit_on_esc(true)
             .build()
             .unwrap();
-        // Not needed if icon is in exe.
-        // let doorways_bytes = include_bytes!("../doorways.bmp");
-        // window.ctx.window().set_window_icon(Some(Icon::from_bytes(doorways_bytes)?));
+        let doorways_bytes = include_bytes!("../doorways.bmp");
+        window
+            .ctx
+            .window()
+            .set_window_icon(Some(Icon::from_bytes(doorways_bytes)?));
+        window.ctx.window().set_maximized(true);
         let mut gl = GlGraphics::new(opengl);
         // TODO: Add support for downloading of images without loading into textures
         doorways.load_imgs()?;

@@ -1,6 +1,6 @@
 [package]
 name = "doorways"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Joshua Benuck <joshua_benuck@yahoo.com>"]
 edition = "2018"
 
@@ -18,7 +18,7 @@ piston2d-graphics = "*"
 pistoncore-glutin_window = "*"
 piston2d-opengl_graphics = "*"
 find_folder = "*"
-image = "*"
+image = "0.22.3"
 reqwest = "*"
 serde = "*"
 serde_json = "*"

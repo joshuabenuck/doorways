@@ -266,7 +266,7 @@ impl Doorways {
             background_color: None,
             icons,
             status_channel: None,
-            show_overlay: false,
+            show_overlay: true,
         }
     }
 
@@ -313,20 +313,27 @@ impl Doorways {
                 ImageSource::Url(_) => Some(game.download_img(&self.image_folder).unwrap()),
                 ImageSource::Path(path) => Some(PathBuf::from(path)),
             };
-            let texture = match Texture::from_path(
-                &game.image_path.as_ref().unwrap(),
-                &TextureSettings::new(),
-            ) {
+            let contents =
+                std::fs::read(game.image_path.as_ref().unwrap()).expect("Unable to read file");
+            let img = match image::load_from_memory(&contents) {
                 Ok(t) => Ok(t),
-                Err(msg) => Err(err_msg(msg)),
+                Err(msg) => {
+                    eprintln!("Unable to load: {}; {}", game.title, msg);
+                    Err(err_msg(msg))
+                }
             };
-            if texture.is_err() {
-                eprintln!("Unable to load: {}", game.title);
+            if img.is_err() {
                 game.hidden = Some(true);
                 self.images.push(None);
                 continue;
             }
-            self.images.push(Some(texture?));
+            let img = match img.unwrap() {
+                image::DynamicImage::ImageRgba8(img) => img,
+                x => x.to_rgba(),
+            };
+
+            let texture = Texture::from_image(&img, &TextureSettings::new());
+            self.images.push(Some(texture));
         }
         Ok(self)
     }
@@ -692,6 +699,10 @@ fn main() -> Result<(), Error> {
     };
     if matches.is_present("refresh") {
         eprintln!("Creating initial games list.");
+        // Reset hidden status during refresh
+        for game in doorways.games.iter_mut() {
+            game.hidden = None;
+        }
         let app_infos = AppInfo::load()?;
         let pkg_infos = PackageInfo::load()?;
         let steam = from_steam(SteamGame::from(&app_infos, &pkg_infos)?);

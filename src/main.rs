@@ -36,7 +36,7 @@ enum ImageSource {
     Path(String),
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Eq, Hash, Clone)]
+#[derive(Deserialize, Serialize, PartialEq, Eq, Hash, Clone, Copy)]
 enum Launcher {
     Steam,
     Twitch,
@@ -246,7 +246,7 @@ struct Doorways {
     allow_filter: bool,
     background_color: Option<Color>,
     icons: HashMap<Launcher, Texture>,
-    status_channel: Option<mpsc::Sender<(usize, Child)>>,
+    status_channel: Option<mpsc::Sender<(usize, Launched)>>,
     show_overlay: bool,
 }
 
@@ -353,7 +353,7 @@ impl Doorways {
         if self.status_channel.is_some() {
             return ();
         }
-        let (tx, rx) = mpsc::channel::<(usize, Child)>();
+        let (tx, rx) = mpsc::channel::<(usize, Launched)>();
         self.status_channel = Some(tx);
         let status = self.status.clone();
         thread::spawn(move || {
@@ -362,15 +362,21 @@ impl Doorways {
     }
 }
 
+struct Launched {
+    child: Child,
+    launcher: Launcher,
+    id: String,
+}
+
 struct ChildMonitor {
-    active: HashMap<usize, Child>,
-    rx: mpsc::Receiver<(usize, Child)>,
+    active: HashMap<usize, Launched>,
+    rx: mpsc::Receiver<(usize, Launched)>,
     status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
 }
 
 impl ChildMonitor {
     fn new(
-        rx: mpsc::Receiver<(usize, Child)>,
+        rx: mpsc::Receiver<(usize, Launched)>,
         status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
     ) -> ChildMonitor {
         ChildMonitor {
@@ -382,20 +388,40 @@ impl ChildMonitor {
 
     fn poll_active(&mut self) {
         let mut to_remove = Vec::<usize>::new();
-        for (i, child) in self.active.iter_mut() {
-            match child.try_wait() {
+        for (i, launched) in self.active.iter_mut() {
+            match launched.child.try_wait() {
                 Ok(Some(exit_status)) => {
-                    to_remove.push(*i);
-                    self.status.lock().unwrap().insert(
-                        *i,
-                        if exit_status.success() {
-                            LaunchStatus::Success
+                    let status = if exit_status.success() {
+                        if launched.launcher == Launcher::Steam {
+                            use winreg::enums::*;
+                            use winreg::RegKey;
+                            let key = format!(r"Software\Valve\Steam\Apps\{}", launched.id);
+                            // look up regkey
+                            let hklm = RegKey::predef(HKEY_CURRENT_USER);
+                            let app = hklm
+                                .open_subkey(key)
+                                .expect("Unable to get exit code from registry");
+                            let running: u32 = app
+                                .get_value("Running")
+                                .expect("Unable to get value for key 'Running'");
+                            if running == 0x01 {
+                                LaunchStatus::Running
+                            } else {
+                                LaunchStatus::Success
+                            }
                         } else {
-                            LaunchStatus::Error(
-                                exit_status.code().expect("Unable to get exit code"),
-                            )
-                        },
-                    );
+                            LaunchStatus::Success
+                        }
+                    } else {
+                        LaunchStatus::Error(exit_status.code().expect("Unable to get exit code"))
+                    };
+                    match status {
+                        LaunchStatus::Running => {}
+                        _ => {
+                            to_remove.push(*i);
+                        }
+                    }
+                    self.status.lock().unwrap().insert(*i, status);
                 }
                 Ok(None) => {
                     self.status
@@ -470,8 +496,15 @@ impl TileHandler for Doorways {
                 let result = self.games[i].launch();
                 match result {
                     Ok(child) => {
-                        tx.send((i, child))
-                            .unwrap_or_else(|err| panic!("Unable to send to thread: {}", err));
+                        tx.send((
+                            i,
+                            Launched {
+                                child,
+                                launcher: self.games[i].launcher,
+                                id: self.games[i].id.clone(),
+                            },
+                        ))
+                        .unwrap_or_else(|err| panic!("Unable to send to thread: {}", err));
                         ()
                     }
                     Err(err) => {

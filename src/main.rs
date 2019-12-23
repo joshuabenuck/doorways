@@ -30,6 +30,9 @@ use url::Url;
 use user32;
 use winapi;
 
+const MAX_TILE_WIDTH: usize = 200;
+const MAX_TILE_HEIGHT: usize = 200;
+
 #[derive(Deserialize, Serialize, Clone)]
 enum ImageSource {
     Url(String),
@@ -332,6 +335,17 @@ impl Doorways {
                 image::DynamicImage::ImageRgba8(img) => img,
                 x => x.to_rgba(),
             };
+            // Resize to reduce GPU memory consumption
+            let scale = f32::min(
+                MAX_TILE_WIDTH as f32 / img.width() as f32,
+                MAX_TILE_HEIGHT as f32 / img.height() as f32,
+            );
+            let img = image::imageops::resize(
+                &img,
+                (img.width() as f32 * scale) as u32,
+                (img.height() as f32 * scale) as u32,
+                image::imageops::FilterType::Nearest,
+            );
 
             let texture = Texture::from_image(&img, &TextureSettings::new());
             self.images.push(Some(texture));
@@ -813,7 +827,7 @@ fn main() -> Result<(), Error> {
         );
         window.set_title(doorways.window_title());
         eprintln!("Current game count: {}", doorways.games.len());
-        let mut grid = Grid::new(Box::new(&mut doorways), 200, 200);
+        let mut grid = Grid::new(Box::new(&mut doorways), MAX_TILE_WIDTH, MAX_TILE_HEIGHT);
         grid.allow_draw_tile = false;
         grid.run(&mut window, &mut gl)?;
         eprintln!("Game count before save: {}", doorways.games.len());

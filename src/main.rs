@@ -228,6 +228,7 @@ enum DisplayFilter {
 }
 
 enum LaunchStatus {
+    Starting,
     Running,
     Success,
     FailedToLaunch(Error),
@@ -495,6 +496,10 @@ impl TileHandler for Doorways {
     }
 
     fn act(&mut self, i: usize) {
+        self.status
+            .lock()
+            .unwrap()
+            .insert(i, LaunchStatus::Starting);
         self.start_status_thread();
         match &self.status_channel {
             None => panic!("Unable to start status thread!"),
@@ -668,6 +673,7 @@ impl TileHandler for Doorways {
                 return ();
             }
             match status.unwrap() {
+                LaunchStatus::Starting => [0.0, 0.0, 0.0, 1.0],
                 LaunchStatus::Running => [0.0, 1.0, 0.0, 1.0],
                 LaunchStatus::Success => [1.0, 0.0, 1.0, 1.0],
                 LaunchStatus::Error(_) => [1.0, 0.0, 0.0, 1.0],

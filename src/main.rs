@@ -496,10 +496,20 @@ impl TileHandler for Doorways {
     }
 
     fn act(&mut self, i: usize) {
-        self.status
-            .lock()
-            .unwrap()
-            .insert(i, LaunchStatus::Starting);
+        {
+            let mut status = self.status.lock().unwrap();
+            // Explicitly enumerating to ensure how each case is handled makes sense.
+            // If we are starting or the game is running, don't attempt to launch again.
+            match status.get(&i) {
+                Some(LaunchStatus::Starting) | Some(LaunchStatus::Running) => return,
+                None
+                | Some(LaunchStatus::Error(_))
+                | Some(LaunchStatus::FailedToLaunch(_))
+                | Some(LaunchStatus::Success) => {}
+            };
+            status.insert(i, LaunchStatus::Starting);
+        }
+
         self.start_status_thread();
         match &self.status_channel {
             None => panic!("Unable to start status thread!"),

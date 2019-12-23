@@ -374,6 +374,21 @@ struct ChildMonitor {
     status: Arc<Mutex<HashMap<usize, LaunchStatus>>>,
 }
 
+fn steam_status(id: &str) -> Result<LaunchStatus, Error> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let key = format!(r"Software\Valve\Steam\Apps\{}", id);
+    // look up regkey
+    let hklm = RegKey::predef(HKEY_CURRENT_USER);
+    let app = hklm.open_subkey(key)?;
+    let running: u32 = app.get_value("Running")?;
+    if running == 0x01 {
+        Ok(LaunchStatus::Running)
+    } else {
+        Ok(LaunchStatus::Success)
+    }
+}
+
 impl ChildMonitor {
     fn new(
         rx: mpsc::Receiver<(usize, Launched)>,
@@ -393,21 +408,12 @@ impl ChildMonitor {
                 Ok(Some(exit_status)) => {
                     let status = if exit_status.success() {
                         if launched.launcher == Launcher::Steam {
-                            use winreg::enums::*;
-                            use winreg::RegKey;
-                            let key = format!(r"Software\Valve\Steam\Apps\{}", launched.id);
-                            // look up regkey
-                            let hklm = RegKey::predef(HKEY_CURRENT_USER);
-                            let app = hklm
-                                .open_subkey(key)
-                                .expect("Unable to get exit code from registry");
-                            let running: u32 = app
-                                .get_value("Running")
-                                .expect("Unable to get value for key 'Running'");
-                            if running == 0x01 {
-                                LaunchStatus::Running
-                            } else {
-                                LaunchStatus::Success
+                            match steam_status(&launched.id) {
+                                Err(msg) => {
+                                    eprintln!("Error getting steam status: {}", msg);
+                                    LaunchStatus::Error(1)
+                                }
+                                Ok(status) => status,
                             }
                         } else {
                             LaunchStatus::Success

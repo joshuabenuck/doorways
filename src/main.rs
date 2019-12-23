@@ -670,6 +670,35 @@ impl TileHandler for Doorways {
                 .zoom(scale.into()),
             gl,
         );
+        let (color, gray_out) = {
+            let mut statuses = self.status.lock().unwrap();
+            let status = statuses.get_mut(&i);
+            if status.is_none() {
+                return ();
+            }
+            let mut gray_out = false;
+            let color = match status.unwrap() {
+                LaunchStatus::Starting => {
+                    gray_out = true;
+                    [0.0, 0.0, 0.0, 0.4]
+                }
+                LaunchStatus::Running => [0.0, 1.0, 0.0, 1.0],
+                LaunchStatus::Success => [1.0, 0.0, 1.0, 1.0],
+                LaunchStatus::Error(_) => [1.0, 0.0, 0.0, 1.0],
+                LaunchStatus::FailedToLaunch(_) => [0.8, 0.8, 0.8, 1.0],
+            };
+            (color, gray_out)
+        };
+        if gray_out {
+            let transform = transform.trans(x_image_margin as f64, y_image_margin as f64);
+            let rect = graphics::rectangle::Rectangle::new(color);
+            rect.draw(
+                [0.0, 0.0, width as f64, height as f64],
+                &state,
+                transform,
+                gl,
+            );
+        }
         if self.show_overlay == false {
             return ();
         }
@@ -690,20 +719,9 @@ impl TileHandler for Doorways {
             }
             None => {}
         }
-        let color = {
-            let mut statuses = self.status.lock().unwrap();
-            let status = statuses.get_mut(&i);
-            if status.is_none() {
-                return ();
-            }
-            match status.unwrap() {
-                LaunchStatus::Starting => [0.0, 0.0, 0.0, 1.0],
-                LaunchStatus::Running => [0.0, 1.0, 0.0, 1.0],
-                LaunchStatus::Success => [1.0, 0.0, 1.0, 1.0],
-                LaunchStatus::Error(_) => [1.0, 0.0, 0.0, 1.0],
-                LaunchStatus::FailedToLaunch(_) => [0.8, 0.8, 0.8, 1.0],
-            }
-        };
+        if gray_out {
+            return ();
+        }
         let transform = transform.trans(
             (x_image_margin + 3) as f64,
             (y_image_margin + height - 20 - 3) as f64,

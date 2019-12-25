@@ -344,7 +344,7 @@ impl Doorways {
                 &img,
                 (img.width() as f32 * scale) as u32,
                 (img.height() as f32 * scale) as u32,
-                image::imageops::FilterType::Nearest,
+                image::imageops::FilterType::Gaussian,
             );
 
             let texture = Texture::from_image(&img, &TextureSettings::new());

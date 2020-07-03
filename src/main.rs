@@ -1,9 +1,10 @@
 // #![windows_subsystem = "windows"]
 // Uncomment to turn off console window completely.
 
+use anyhow::{anyhow, Error, Result};
 use clap::{App, Arg};
 use dirs;
-use failure::{err_msg, Error};
+use epic::{EpicGame, EpicGames, EPIC_GAMES_JSON};
 use glutin::Icon;
 use glutin_window::GlutinWindow as Window;
 use graphics::{math::Matrix2d, DrawState, Image, Transformed};
@@ -43,6 +44,7 @@ enum ImageSource {
 enum Launcher {
     Steam,
     Twitch,
+    Epic,
     Unknown,
 }
 
@@ -136,7 +138,7 @@ impl Game {
             launch.args(&["/C", "start", self.launch_url.as_ref().unwrap()]);
             return Ok(launch.spawn()?);
         }
-        Err(err_msg("Unable to launch: Missing launch_url or command"))
+        Err(anyhow!("Unable to launch: Missing launch_url or command",))
     }
 }
 
@@ -187,6 +189,29 @@ fn from_steam(games: Vec<SteamGame>) -> Vec<Game> {
         .collect();
     println!("Steam -- {}", games.len());
     games
+}
+
+fn from_epic(games: Vec<EpicGame>) -> Vec<Game> {
+    games
+        .iter()
+        .filter(|g| g.image_url.is_some())
+        .map(|g| Game {
+            id: g.display_name.clone(),
+            title: g.display_name.clone(),
+            image_src: ImageSource::Url(g.image_url.as_ref().unwrap().clone()),
+            installed: true,
+            install_directory: Some(g.install_location.clone()),
+            working_subdir_override: None,
+            command: Some(g.launch_executable.clone()),
+            args: None,
+            kids: None,
+            hidden: Some(false),
+            players: None,
+            image_path: None,
+            launch_url: None,
+            launcher: Launcher::Epic,
+        })
+        .collect()
 }
 
 trait VecGame {
@@ -323,7 +348,7 @@ impl Doorways {
                 Ok(t) => Ok(t),
                 Err(msg) => {
                     eprintln!("Unable to load: {}; {}", game.title, msg);
-                    Err(err_msg(msg))
+                    Err(anyhow!(msg))
                 }
             };
             if img.is_err() {
@@ -740,7 +765,7 @@ fn hide_console_window() {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<()> {
     let matches = App::new("doorways")
         .about("A unified launcher for common game libraries.")
         .arg(
@@ -800,6 +825,9 @@ fn main() -> Result<(), Error> {
         let twitch = from_twitch(TwitchGame::from_db(&twitch_db)?);
         eprintln!("Twitch games: {}", twitch.len());
         doorways.games = doorways.games.merge_with(twitch);
+        let epic_games = EpicGame::load(&home.join(".epic"))?;
+        let epic = from_epic(epic_games);
+        doorways.games = doorways.games.merge_with(epic);
     };
 
     if matches.is_present("launcher") {
@@ -839,6 +867,24 @@ fn main() -> Result<(), Error> {
             Texture::from_image(
                 &image::load_from_memory(include_bytes!("../twitch.ico"))
                     .expect("Unable to load twitch icon.")
+                    .to_rgba(),
+                &settings,
+            ),
+        );
+        doorways.icons.insert(
+            Launcher::Epic,
+            Texture::from_image(
+                &image::load_from_memory(include_bytes!("../epic.ico"))
+                    .expect("Unable to load epic icon.")
+                    .to_rgba(),
+                &settings,
+            ),
+        );
+        doorways.icons.insert(
+            Launcher::Unknown,
+            Texture::from_image(
+                &image::load_from_memory(include_bytes!("../win10.png"))
+                    .expect("Unable to load win10 icon.")
                     .to_rgba(),
                 &settings,
             ),

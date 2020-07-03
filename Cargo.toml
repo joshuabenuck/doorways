@@ -9,7 +9,6 @@ edition = "2018"
 [dependencies]
 clap = "*"
 dirs = "*"
-failure = "*"
 glob = "*"
 glutin = "*"
 piston = "0.49.0"
@@ -26,10 +25,12 @@ url = "*"
 image_grid = { path = "../image_grid" }
 twitch = { path = "../twitch" }
 steam = { path = "../steam" }
+epic = { path = "../epic" }
 winapi = "0.3.8"
 kernel32-sys = "*"
 user32-sys = "*"
 winreg = "0.6.2"
+anyhow = "1.0.31"
 
 [build-dependencies]
 winres = "*"

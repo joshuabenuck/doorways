@@ -195,21 +195,28 @@ fn from_epic(games: Vec<EpicGame>) -> Vec<Game> {
     games
         .iter()
         .filter(|g| g.image_url.is_some())
-        .map(|g| Game {
-            id: g.display_name.clone(),
-            title: g.display_name.clone(),
-            image_src: ImageSource::Url(g.image_url.as_ref().unwrap().clone()),
-            installed: true,
-            install_directory: Some(g.install_location.clone()),
-            working_subdir_override: None,
-            command: Some(g.launch_executable.clone()),
-            args: None,
-            kids: None,
-            hidden: Some(false),
-            players: None,
-            image_path: None,
-            launch_url: None,
-            launcher: Launcher::Epic,
+        .map(|g| {
+            let command = &g.launch_command;
+            let args = match command {
+                None => None,
+                Some(c) => Some(c.split(" ").map(|s| s.to_owned()).collect()),
+            };
+            Game {
+                id: g.display_name.clone(),
+                title: g.display_name.clone(),
+                image_src: ImageSource::Url(g.image_url.as_ref().unwrap().clone()),
+                installed: true,
+                install_directory: Some(g.install_location.clone()),
+                working_subdir_override: None,
+                command: Some(g.launch_executable.clone()),
+                args: args,
+                kids: None,
+                hidden: Some(false),
+                players: None,
+                image_path: None,
+                launch_url: None,
+                launcher: Launcher::Epic,
+            }
         })
         .collect()
 }

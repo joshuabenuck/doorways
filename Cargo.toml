@@ -1,6 +1,6 @@
 [package]
 name = "doorways"
-version = "0.1.7"
+version = "0.1.9"
 authors = ["Joshua Benuck <joshua_benuck@yahoo.com>"]
 edition = "2018"
 
